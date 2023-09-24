@@ -1,0 +1,18 @@
+description: Ultralytics best model trained on data/data.yaml
+author: Ultralytics
+license: AGPL-3.0 https://ultralytics.com/license
+date: '2023-09-21T09:12:36.045059'
+version: 8.0.183
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: address
+  1: company
+  2: email
+  3: name
+  4: position
+  5: tel
