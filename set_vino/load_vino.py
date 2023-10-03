@@ -1,6 +1,6 @@
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt 
 from pathlib import Path
 import os
 from typing import Tuple, Dict
@@ -13,13 +13,15 @@ import openvino as ov
 import json
 
 
-class LoadVino :
-    def __init__(self, model_path, device, label_map):
+class loadVino :
+    
+    def __init__(self, model_path, device, label_map, model_imgsz):
         self.core = ov.Core()
         self.det_ov_model = self.core.read_model(model_path)
-        self.det_ov_model.reshape({0: [1, 3, 640, 640]})
+        self.det_ov_model.reshape({0: [1, 3, model_imgsz, model_imgsz]})
         self.model = self.core.compile_model(self.det_ov_model, device)
         self.label_map = label_map
+        self.model_imgsz = model_imgsz
     
     def plot_one_box(self, box: np.ndarray, img: np.ndarray,
                      color: Tuple[int, int, int] = None,
@@ -39,15 +41,17 @@ class LoadVino :
 
     
     def draw_results(self,results:Dict, source_image:np.ndarray, label_map:Dict):
-        first_result = results[0]  # Access the first dictionary in the list
-        boxes = first_result["det"]  # Access the "det" key within the first dictionary
+        boxes = results["det"]  
         for idx, (*xyxy, conf, lbl) in enumerate(boxes):
             label = f'{label_map[int(lbl)]} {conf:.2f}'
             source_image = self.plot_one_box(xyxy, source_image, label=label, color=colors(int(lbl)), line_thickness=1)
         return source_image 
 
     
-    def letterbox(self,img: np.ndarray, new_shape:Tuple[int, int] = (640, 640), color:Tuple[int, int, int] = (114, 114, 114), auto:bool = False, scale_fill:bool = False, scaleup:bool = False, stride:int = 32):
+    def letterbox(self,img: np.ndarray, new_shape:Tuple[int, int] = None, color:Tuple[int, int, int] = (114, 114, 114), auto:bool = False, scale_fill:bool = False, scaleup:bool = False, stride:int = 32):
+        if new_shape is None:
+            new_shape = (self.model_imgsz, self.model_imgsz)
+    
         # Resize and pad image while meeting stride-multiple constraints
         shape = img.shape[:2]  # current shape [height, width]
         if isinstance(new_shape, int):
@@ -74,9 +78,9 @@ class LoadVino :
     
         if shape[::-1] != new_unpad:  # resize
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
-        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+            top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+            left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+            img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
         return img, ratio, (dw, dh)
 
         
@@ -125,10 +129,8 @@ class LoadVino :
             if not len(pred):
                 results.append({"det": [], "segment": []})
                 continue
-            pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
+            pred[:, :4] = self.scale_boxes(input_hw, pred[:, :4], shape).round()
             results.append({"det": pred})
-    
-    
         return results
 
         
@@ -141,29 +143,99 @@ class LoadVino :
         detections = self.postprocess(pred_boxes=boxes, input_hw=input_hw, orig_img=image)
         return detections
 
+        
+    def get_boxes(self, image: np.ndarray):
+        preprocessed_image = self.preprocess_image(image)
+        input_tensor = self.image_to_tensor(preprocessed_image)
+        result = self.model(input_tensor)
+        boxes = result[self.model.output(0)]
+        return boxes
 
     def format_detection(self, detections, label_map):
         self.detections = detections
         self.label_map = label_map
-        self.output_data = {
-            "status": True,
-            "code": 200,
-            "message": "success",
-            "data": []
-        }
-        for detection in self.detections:
-            det_data = detection['det']
-            for row in det_data:
-                formatted_detection = {
-                    "confident": float(row[4]),
-                    "label": self.label_map[int(row[5])],
-                    "description": "Object-Detection",
-                    "xmin": int(row[0]),
-                    "ymin": int(row[1]),
-                    "xmax": int(row[2]),
-                    "ymax": int(row[3])
-                }
-                self.output_data['data'].append(formatted_detection)
-
+        self.output_data = []
+        for detection in self.detections['det']:
+            formatted_detection = {
+                "confident": float(detection[4]),
+                "label": self.label_map[int(detection[5])],
+                "description": "Object-Detection",
+                "xmin": int(detection[0]),
+                "ymin": int(detection[1]),
+                "xmax": int(detection[2]),
+                "ymax": int(detection[3])
+             }
+            self.output_data.append(formatted_detection)
+        return self.output_data
     def to_json(self):
         return json.dumps(self.output_data, indent=2)
+
+    
+    def iou(self, box1,box2):
+        return self.intersection(box1,box2)/self.union(box1,box2)
+
+    def union(self, box1,box2):
+        box1_x1,box1_y1,box1_x2,box1_y2 = box1[:4]
+        box2_x1,box2_y1,box2_x2,box2_y2 = box2[:4]
+        box1_area = (box1_x2-box1_x1)*(box1_y2-box1_y1)
+        box2_area = (box2_x2-box2_x1)*(box2_y2-box2_y1)
+        return box1_area + box2_area - self.intersection(box1,box2)
+    
+    def intersection(self, box1,box2):
+        box1_x1,box1_y1,box1_x2,box1_y2 = box1[:4]
+        box2_x1,box2_y1,box2_x2,box2_y2 = box2[:4]
+        x1 = max(box1_x1,box2_x1)
+        y1 = max(box1_y1,box2_y1)
+        x2 = min(box1_x2,box2_x2)
+        y2 = min(box1_y2,box2_y2)
+        return (x2-x1)*(y2-y1) 
+        
+    def scale_boxes(self, img1_shape, boxes, img0_shape, ratio_pad=None, padding=True):
+        
+        if ratio_pad is None:  # calculate from img0_shape
+            gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
+            pad = round((img1_shape[1] - img0_shape[1] * gain) / 2 - 0.1), round(
+                (img1_shape[0] - img0_shape[0] * gain) / 2 - 0.1)  # wh padding
+        else:
+            gain = ratio_pad[0][0]
+            pad = ratio_pad[1]
+    
+        if padding:
+            boxes[..., [0, 2]] -= pad[0]  # x padding
+            boxes[..., [1, 3]] -= pad[1]  # y padding
+        boxes[..., :4] /= gain
+        return boxes
+        
+    def process_output(self,input_image: np.ndarray, img_width, img_height, conf, iou_conf):
+        pred_boxes = self.get_boxes(input_image)[0]
+        pred_boxes = pred_boxes.astype(float)
+        pred_boxes = pred_boxes.transpose()
+        boxes = []
+        for row in pred_boxes:
+            prob = row[4:].max()
+            if prob < conf:
+                continue
+            class_id = row[4:].argmax()
+            label = self.label_map[class_id]
+            xc, yc, w, h = row[:4]
+            x1 = (xc - w/2)
+            y1 = (yc - h/2)
+            x2 = (xc + w/2)
+            y2 = (yc + h/2) 
+            boxes.append([x1, y1, x2, y2, prob, class_id])
+        boxes.sort(key=lambda x: x[4], reverse=True)
+        result = []
+        while len(boxes) > 0:
+            result.append(boxes[0])
+            boxes = [box for box in boxes if self.iou(box, boxes[0]) < iou_conf]
+        scaled=[]
+        for i, pred in enumerate(result):
+            if isinstance(pred, list):
+                pred = np.array(pred)  # Convert to NumPy array if pred is a list
+            pred[:4] = self.scale_boxes((640, 640), pred[:4], (img_height, img_width)).round()
+            scaled.append(pred)
+            formatted_list = [list(item) for item in scaled]
+        results = {}
+        results['det']=formatted_list 
+        return results
+    
